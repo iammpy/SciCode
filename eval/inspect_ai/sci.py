@@ -11,8 +11,8 @@ from inspect_ai.scorer import scorer, mean, metric, Metric, Score, Target
 from scicode.parse.parse import extract_function_name, get_function_from_code
 from scicode.gen.models import generate_dummy_response, extract_python_script
 
-BACKGOUND_PROMPT_TEMPLATE = Path("../data", "multistep_template.txt").read_text()
-DEFAULT_PROMPT_TEMPLATE = Path("../data", "background_comment_template.txt").read_text()
+BACKGOUND_PROMPT_TEMPLATE = Path("./eval/data", "multistep_template.txt").read_text()
+DEFAULT_PROMPT_TEMPLATE = Path("./eval/data", "background_comment_template.txt").read_text()
 
 class ScicodePromptingAssistant:
     def __init__(
@@ -343,8 +343,11 @@ def scicode_solver(**params: dict[str, Any]):
                     result = await generate(state=state_copy)
                     response_from_llm = result.output.completion
                     # ===Model Generation===
-                except:
-                    print(f"Failed to generate response for problem {prob_id} step {idx+1}.")
+                except Exception as e_solver: # 捕获具体的 Exception 而不是所有东西
+                    print(f"!!! 在 SCICODE_SOLVER 中捕获到异常 (问题 {prob_id} 步骤 {idx+1}) !!!")
+                    import traceback
+                    traceback.print_exc() # 打印完整的错误堆栈跟踪
+                    print(f"Solver 层面捕获的异常类型: {type(e_solver).__name__} - {e_solver}")
                     response_from_llm = generate_dummy_response(prompt)
             prompt_assistant.register_previous_response(
                 prob_data=state.metadata,
@@ -417,3 +420,6 @@ def scicode(
             h5py_file=h5py_file,
         ),
     )
+
+
+
