@@ -1,6 +1,8 @@
 *.h5
 *.txt
-
+tmp_*
+output_*
+output_run*
 # Project specific ignores
 keys.cfg
 **/test_result/**

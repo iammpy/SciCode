@@ -3,39 +3,34 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-import copy # scicode_solver 可能隐式依赖，保留导入
-from inspect_ai.scorer import Target         # Target 类通常在 scorer 模块中
+import copy # scicode_solver 可能隐式依赖
+import json # 用于保存 JSON 文件
+from typing import List, Dict, Any, Callable 
 
+from inspect_ai.scorer import Target, Score # 导入 Score 类型
+from inspect_ai.dataset import Sample 
+# huoshan_model_id_for_inspect_ai = "deepseek-r1" 
+huoshan_model_id_for_inspect_ai = "doubao-1.5-thinking-pro" 
 # --- 路径设置 ---
-# 此脚本位于 D:\code\sciCode\SciCode\eval\inspect_ai\
-# 项目根目录是向上两级
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent.parent  # D:\code\sciCode\SciCode
+PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent.parent  
 SRC_DIR = PROJECT_ROOT / "src"
 
-# 将 src 目录和项目根目录添加到 sys.path 以确保导入顺利
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-# 将 PROJECT_ROOT 添加到 sys.path，使得 eval.inspect_ai... 可以被找到
-# 或者更准确地说，使得此脚本所在的 eval.inspect_ai 目录可以作为包的一部分被其他地方导入（如果需要）
-# 并且，如果 scicode_task_definition.py 在 eval/inspect_ai/ 下，这样也方便
-if str(PROJECT_ROOT) not in sys.path: # 通常 project_root 下的 src 已添加，但为了eval.inspect_ai的导入
+if str(PROJECT_ROOT) not in sys.path: 
     sys.path.insert(0, str(PROJECT_ROOT))
-
 
 # --- 核心导入 ---
 try:
-    # 假设包含 @task def scicode(...) 的文件名为 scicode_task_def.py
-    # 并且它与此脚本在同一个目录 eval/inspect_ai/
     from eval.inspect_ai.sci import scicode as get_scicode_task_definition
 except ModuleNotFoundError as e:
-    print(f"错误：无法从 'eval.inspect_ai.scicode_task_def' 导入 'scicode' 任务定义函数。")
-    print(f"请确保 'scicode_task_def.py' 文件（包含@task scicode）位于 {CURRENT_SCRIPT_DIR} 目录下，")
+    print(f"错误：无法从 'eval.inspect_ai.sci' 导入 'scicode' 任务定义函数。")
+    print(f"请确保 'sci.py' 文件（包含@task scicode）位于 {CURRENT_SCRIPT_DIR} 目录下，")
     print(f"或者相应调整此导入语句。详细错误: {e}")
     sys.exit(1)
 
 try:
-    # 从同目录的 custom_llm.py 导入 HuoshanLLM 类
     from eval.inspect_ai.custom_llm import HuoshanLLM
 except ModuleNotFoundError as e:
     print(f"错误：无法从 'eval.inspect_ai.custom_llm' 导入 'HuoshanLLM' 类。")
@@ -43,181 +38,322 @@ except ModuleNotFoundError as e:
     sys.exit(1)
 
 from inspect_ai.solver import TaskState
-from inspect_ai.model import ChatMessageUser, ModelOutput, ModelAPI, GenerateConfig, ModelUsage # 新的导入
+from inspect_ai.model import ChatMessageUser, ModelOutput, ModelAPI, GenerateConfig, ModelUsage
+
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# 处理单个主问题的异步函数 (包含日志收集)
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+async def process_one_sample(
+    current_sample: Sample,
+    solver_callable: Callable, 
+    llm_instance: ModelAPI,   
+    huoshan_model_id_for_paths_main: str,
+) -> Dict[str, Any]:
+
+    problem_id = current_sample.id
+    print(f"****** [并发处理中] 开始处理样本 ID: {problem_id} ******")
+
+    sub_step_interaction_logs: List[Dict[str, Any]] = []
+
+    model_id_for_this_sample = current_sample.metadata.get("model_name", huoshan_model_id_for_paths_main)
+    if model_id_for_this_sample != huoshan_model_id_for_paths_main:
+         print(f"  [样本 {problem_id}] 使用元数据中的 model_id: {model_id_for_this_sample} (用于路径)")
+    
+    initial_user_message = ChatMessageUser(content="")
+    current_task_state_for_solver = TaskState(
+        model=model_id_for_this_sample,
+        sample_id=current_sample.id,
+        epoch=0,
+        input=current_sample.input,
+        messages=[initial_user_message],
+        metadata=current_sample.metadata,
+        target=Target(current_sample.target),
+        choices=current_sample.choices if current_sample.choices is not None else []
+    )
+
+    async def generate_adapter_for_solver(state: TaskState) -> TaskState:
+        current_sub_step_prompt = state.user_prompt.text
+        
+        processed_states_list = await llm_instance.generate(states=[state])
+        updated_state_by_llm = processed_states_list[0]
+
+        full_llm_response_text = "[适配器：无法从metadata或completion获取原始回复]"
+        completion_for_extractor = full_llm_response_text 
+
+        if updated_state_by_llm.output :
+            raw_response_from_metadata = None
+            if updated_state_by_llm.output.metadata and \
+               "raw_completion_with_think" in updated_state_by_llm.output.metadata:
+                raw_response_from_metadata = updated_state_by_llm.output.metadata["raw_completion_with_think"]
+
+            # 优先使用 metadata 中存储的原始响应 (如果您的 HuoshanLLM 存了)
+            # 否则，退回到 output.completion (这应该是 HuoshanLLM 设置的原始响应)
+            if raw_response_from_metadata is not None:
+                full_llm_response_text = str(raw_response_from_metadata) #确保是字符串
+                print(f"  [样本 {problem_id} - 适配器] 从 metadata 获取的完整原始响应 (前200): '{full_llm_response_text[:200]}...'")
+            elif hasattr(updated_state_by_llm.output, 'completion') and updated_state_by_llm.output.completion:
+                full_llm_response_text = updated_state_by_llm.output.completion
+                print(f"  [样本 {problem_id} - 适配器] 从 output.completion 获取的完整原始响应 (前200): '{full_llm_response_text[:200]}...'")
+            else:
+                 print(f"  [样本 {problem_id} - 适配器] 警告: 未能在 output.metadata 或 output.completion 中找到原始响应。")
+
+
+            if isinstance(full_llm_response_text, str):
+                temp_completion_for_extractor = full_llm_response_text
+                code_block_marker = "```python"
+                code_block_start_index = full_llm_response_text.lower().find(code_block_marker.lower())
+
+                if code_block_start_index != -1:
+                    temp_completion_for_extractor = full_llm_response_text[code_block_start_index:]
+                else:
+                    print(f"  [样本 {problem_id} - 适配器] 警告: 在LLM响应中未找到代码块标记 '{code_block_marker}'。")
+                completion_for_extractor = temp_completion_for_extractor
+            else: # full_llm_response_text 不是字符串
+                error_msg = f"获取的原始响应非字符串 (类型: {type(full_llm_response_text).__name__})"
+                print(f"  [样本 {problem_id} - 适配器] 错误: {error_msg}")
+                completion_for_extractor = f"[适配器错误: {error_msg}]"
+                if not isinstance(full_llm_response_text, str):
+                    full_llm_response_text = str(full_llm_response_text) # 确保日志是字符串
+
+            try:
+                if not updated_state_by_llm.output: 
+                    updated_state_by_llm.output = ModelOutput(model=state.model, choices=[])
+                updated_state_by_llm.output.completion = completion_for_extractor
+            except Exception as e_set_completion:
+                print(f"  [样本 {problem_id} - 适配器] 警告: 动态设置 .completion 属性时出错: {e_set_completion}。")
+        
+        else: 
+            print(f"  [样本 {problem_id} - 适配器] 错误: HuoshanLLM.generate 未设置 state.output。")
+            updated_state_by_llm.output = ModelOutput(model=state.model, completion=completion_for_extractor, error="HuoshanLLM 未产生 output 对象")
+
+        # 为 JSON 日志记录收集数据
+        # 假设 ScicodePromptingAssistant 会保存带有步骤号的 prompt 文件，我们可以从那里读取实际的 step_id
+        # 或者，如果 prompt_assistant 在 state.metadata 中留下了当前步骤信息，也可以用。
+        # 这里简化，仅存 prompt 和响应。step_number 需要更复杂的逻辑来精确对应。
+        sub_step_interaction_logs.append({
+            "prompt_for_sub_step": current_sub_step_prompt, # 这是发送给LLM的
+            "raw_llm_response_with_think": full_llm_response_text, # 原始完整响应
+            "code_passed_to_extractor": completion_for_extractor # 清理后给 SciCode 提取器的
+        })
+            
+        return updated_state_by_llm
+
+    print(f"  [样本 {problem_id}] 正在调用 Solver...")
+    final_task_state_for_main_problem = await solver_callable(
+        state=current_task_state_for_solver,
+        generate=generate_adapter_for_solver 
+    )
+    print(f"  [样本 {problem_id}] Solver 完成。")
+    
+    return {
+        "problem_id": problem_id,
+        "status": "processed_by_solver",
+        "sub_step_interactions": sub_step_interaction_logs,
+        "final_task_state_for_scorer": final_task_state_for_main_problem,
+        "original_sample_for_target": current_sample # Scorer 需要用原始 sample 的 target
+    }
 
 async def main():
-    print("--- 开始自定义 SciCode 评估运行 ---")
+    print("--- 开始自定义 SciCode 评估运行 (并发版 + 评分 + JSON日志) ---")
+    print("提示：请确保您的火山引擎 API 认证信息已在 api_config.yaml 中正确配置...")
 
-    # --- 1. 环境和配置检查 ---
-    # 对于火山引擎模型，您可能不需要 OPENAI_API_KEY，但最好检查您自己的密钥管理方式
-    # 确保 call_huoshan_sync_wrapper 能通过 config_path 访问到必要的认证信息
-    print("提示：请确保您的火山引擎 API 认证信息已在 api_config.yaml 中正确配置，")
-    print("      或者您的 call_huoshan_sync_wrapper 函数能正确获取它们。")
-
-    # --- 2. 定义任务和模型参数 ---
-    output_dir_path = PROJECT_ROOT / "output_run_custom_scicode_huoshan" # 自定义输出目录
+    output_dir_path = PROJECT_ROOT / "output_run_custom_scicode_final" # 更新输出目录
     output_dir_path.mkdir(parents=True, exist_ok=True)
-    print(f"所有输出（Prompts, 生成的代码等）将保存到: {output_dir_path.resolve()}")
+    print(f"所有输出将保存到: {output_dir_path.resolve()}")
 
-    # 这个模型ID将用于 inspect-ai 内部记录和路径生成
-    # 它应该与传递给 HuoshanLLM 构造函数的 model_name 一致
-    huoshan_model_id_for_inspect_ai = "huoshan/doubao-pro-final-test" # 您可以自定义
+    
 
-    # 数据文件路径 (HDF5)
     h5_file_path = PROJECT_ROOT / "tests" / "test_data.h5"
     if not h5_file_path.exists():
         print(f"错误: HDF5 数据文件未在指定路径找到: {h5_file_path}")
         return
         
-    # API 配置文件路径 (给您的 HuoshanLLM 类)
-    # 假设 api_config.yaml 与 run_custom_scicode_eval.py 在同一目录
     api_config_file = CURRENT_SCRIPT_DIR / "api_config.yaml"
-    # 为方便演示，如果 api_config.yaml 不存在则创建一个虚拟的
-    if not api_config_file.exists():
-        with open(api_config_file, "w", encoding="utf-8") as f:
-            f.write("# 请在此处填入您的火山引擎 API 配置\n")
-            f.write("api_key: YOUR_HUOSHAN_KEY\n")
-            f.write("secret_key: YOUR_HUOSHAN_SECRET\n")
-            f.write("endpoint: YOUR_HUOSHAN_ENDPOINT\n")
-        print(f"提示: 已在 {api_config_file} 创建一个虚拟的 api_config.yaml, 请填入您的真实配置。")
+    # ... (api_config.yaml 创建逻辑不变) ...
+    if not api_config_file.exists(): # 简化的创建逻辑
+        with open(api_config_file, "w", encoding="utf-8") as f: f.write("# Huoshan API Config\n")
+        print(f"提示: 已在 {api_config_file} 创建一个虚拟的 api_config.yaml...")
+
 
     task_params = {
-        'split': 'validation',             # 建议用 'dev' 集开始，因其通常包含 ground truth 用于对比
-        'output_dir': str(output_dir_path),
-        'with_background': False,   # 根据需要调整
-        'mode': 'normal',           # **必须是 'normal' 才能触发实际的 LLM 调用逻辑**
-        'h5py_file': str(h5_file_path)
+        'split': 'test', 
+        'output_dir': str(output_dir_path), # 这个 output_dir 会被 scorer 用来找生成的代码
+        'with_background': False,  
+        'mode': 'normal',          
+        'h5py_file': str(h5_file_path) # scorer 会用到这个 h5py_file
     }
     print(f"\n初始化 SciCode 任务定义，参数: {task_params}")
 
-    # --- 3. 获取 Task 对象 (包含数据集、解题器工厂、评分器工厂) ---
     task_definition = get_scicode_task_definition(**task_params)
-    dataset = task_definition.dataset
-    solver_callable = task_definition.solver # 这是已经配置好参数的 async solve(state, generate) 函数
+    dataset = task_definition.dataset 
+    solver_callable = task_definition.solver
+    
+    # --- 获取 Scorer 函数 ---
+    scorer_from_task_definition = task_definition.scorer 
+    print(f"DEBUG: Type of task_definition.scorer: {type(scorer_from_task_definition)}")
+    print(f"DEBUG: Value of task_definition.scorer: {scorer_from_task_definition}")
 
-    # --- 4. 初始化您的自定义 HuoshanLLM ---
+    actual_score_function: Callable # 类型提示
+
+    if isinstance(scorer_from_task_definition, list):
+        if scorer_from_task_definition: # 确保列表不为空
+            actual_score_function = scorer_from_task_definition[0] # 取列表中的第一个元素
+            print("Scorer 函数已从列表中获取 (原已配置)。")
+        else:
+            print("错误：task_definition.scorer 是一个空列表！")
+            # 在此可以决定是退出还是不进行评分
+            await llm_instance.close()
+            return 
+    elif callable(scorer_from_task_definition): # 如果它直接是函数 (不太可能了，根据错误信息)
+        actual_score_function = scorer_from_task_definition
+        print("Scorer 函数直接获取 (原已配置)。")
+    else:
+        print(f"错误：task_definition.scorer 不是预期的类型 (列表或可调用对象)，而是 {type(scorer_from_task_definition)}。")
+        await llm_instance.close()
+        return
+
+
     print(f"\n正在初始化自定义火山 LLM: {huoshan_model_id_for_inspect_ai}...")
     llm_instance: ModelAPI = HuoshanLLM(
-        model_name=huoshan_model_id_for_inspect_ai, # 此名称用于 inspect-ai 记录和路径
-        config_path=str(api_config_file),          # 传递给 HuoshanLLM
-        temperature=0.6                            # 示例，可以配置
-        # max_tokens 等其他参数也可以在这里传递
+        model_name=huoshan_model_id_for_inspect_ai, 
+        config_path=str(api_config_file),          
+        temperature=0.6                            
     )
     print("自定义火山 LLM 初始化完成。")
 
-    # --- 5. 遍历数据集并处理样本 ---
-    max_samples_to_process = 2 # 为了演示，只处理少量样本
-    processed_samples_count = 0
+    max_samples_to_process = 80 # 为了演示，处理少量样本 (例如2个)
+    CONCURRENCY_LIMIT = 80      # 为简化调试，先设为1，跑通后再调大 (例如3-5)
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-    for current_sample in dataset:
-        if processed_samples_count >= max_samples_to_process:
-            print(f"\n已达到最大处理样本数 ({max_samples_to_process})，演示结束。")
+    all_processing_tasks = []
+    samples_from_dataset = []
+    temp_count = 0
+    for s_item in dataset: # dataset 是可迭代的，但不一定是列表
+        if temp_count >= max_samples_to_process:
             break
-        
-        processed_samples_count += 1
-        problem_id = current_sample.id
-        print(f"\n****** 开始处理样本 {processed_samples_count}: ID {problem_id} ******")
+        samples_from_dataset.append(s_item)
+        temp_count += 1
+    
+    if not samples_from_dataset:
+        print("数据集中没有样本或未能取出样本进行处理。")
+        await llm_instance.close()
+        return
 
-        # --- 5.1 准备 TaskState ---
+    print(f"将从数据集中挑选 {len(samples_from_dataset)} 个样本进行并发处理（并发上限: {CONCURRENCY_LIMIT}）。")
 
-        print(f"  正在为样本 {problem_id} 准备 TaskState...")
-        print(f"current_sample: {current_sample.target}")
-        initial_user_message = ChatMessageUser(content="") 
-        huoshan_model_id_for_paths= current_sample.metadata.get("model_name", huoshan_model_id_for_inspect_ai)
+    async def constrained_process_one_sample_wrapper(sample_to_process: Sample):
+        async with semaphore:
+            return await process_one_sample(
+                current_sample=sample_to_process,
+                solver_callable=solver_callable,
+                llm_instance=llm_instance,
+                # task_params 不再直接传递给 process_one_sample，因为 solver 和 scorer 已经通过工厂配置好了
+                huoshan_model_id_for_paths_main=huoshan_model_id_for_inspect_ai
+            )
 
-        current_task_state = TaskState(
-            model=huoshan_model_id_for_paths,
-            sample_id=current_sample.id,
-            epoch=0,
-            input=current_sample.input,  # 或者用 "", 因为 solver 主要用 metadata 构建 prompt
-            messages=[initial_user_message], # <--- 将初始消息放到 messages 列表中
-            metadata=current_sample.metadata,
-            target=Target(current_sample.target), # 确保 Target 初始化正确
-            choices=current_sample.choices if current_sample.choices is not None else []
-        )
-        # --- 定义传递给 Solver 的 `generate` 适配器函数 ---
-        # 这个适配器会调用我们实例化的 llm_instance (即 HuoshanLLM 对象) 的 generate 方法。
-        async def generate_adapter_for_solver(state: TaskState) -> TaskState:
-            # state.user_prompt.text 应该已经被 scicode_solver 填充了当前的具体子问题 prompt
-            current_sub_step_prompt = state.user_prompt.text
-            print(f"  [适配器] Solver 请求 LLM 生成。Prompt (前100字符): '{current_sub_step_prompt[:100]}...'")
-            
-            # 这个调用会执行 HuoshanLLM.generate -> call_huoshan_sync_wrapper
-            # call_huoshan_sync_wrapper 现在返回包含 <think> 标签的完整原始响应
-            processed_states_list = await llm_instance.generate(states=[state])
-            
-            updated_state_from_llm = processed_states_list[0]
-            print(f"undated_content: {updated_state_from_llm.output.completion}")
+    for current_sample_item in samples_from_dataset:
+        task = asyncio.create_task(constrained_process_one_sample_wrapper(current_sample_item))
+        all_processing_tasks.append(task)
+    
+    if not all_processing_tasks:
+        print("没有创建处理任务。")
+    else:
+        print(f"创建了 {len(all_processing_tasks)} 个并发任务。正在等待 Solver 完成...")
+        # completed_task_results 是一个列表，包含了每个 process_one_sample 调用的返回值 (字典)
+        completed_task_results: List[Dict[str, Any]] = await asyncio.gather(*all_processing_tasks, return_exceptions=True)
+        print("\n所有 Solver 任务处理完成。")
 
-            # full_llm_response_text 现在是包含 <think>...</think> 和代码块的完整原始响应
-            full_llm_response_text = "[LLM无输出或输出对象为空]" # 默认值
-            if updated_state_from_llm.output and updated_state_from_llm.output.metadata:
-                full_llm_response_text = updated_state_from_llm.output.metadata['completion']
-                print(f"  [适配器] LLM 返回的完整原始响应 (前200字符): '{full_llm_response_text[:200]}...'")
+        # --- 收集日志并准备评分 ---
+        results_for_json_file = []
+        all_scores_from_evaluator: List[Score] = []
+                # --- 保存 JSON 日志文件 ---
+        if results_for_json_file:
+            json_log_path = output_dir_path / f"{huoshan_model_id_for_inspect_ai.replace('/', '-')}_interactions_log.json"
+            try:
+                # 清理日志，确保可序列化 (TaskState 对象本身不适合直接序列化)
+                serializable_logs = []
+                for res_dict in results_for_json_file:
+                    # final_task_state_for_scorer 包含了 TaskState 对象，不能直接序列化
+                    # 我们主要关心 sub_step_interactions
+                    log_entry = {
+                        "problem_id": res_dict.get("problem_id"),
+                        "status": res_dict.get("status"),
+                        "sub_step_interactions": res_dict.get("sub_step_interactions", [])
+                    }
+                    if "error_details" in res_dict:
+                        log_entry["error_details"] = res_dict["error_details"]
+                    serializable_logs.append(log_entry)
 
-                # --- 在这里处理响应，为 extract_python_script 准备干净的输入 ---
-                completion_for_extractor = full_llm_response_text
-                code_block_marker = "```python"
-                code_block_start_index = full_llm_response_text.lower().find(code_block_marker.lower())
-
-                if code_block_start_index != -1:
-                    completion_for_extractor = full_llm_response_text[code_block_start_index:]
-                    print(f"  [适配器] 清理后，传递给 extract_python_script 的内容 (前100字符): '{completion_for_extractor[:100]}...'")
-                else:
-                    print(f"  [适配器] 警告: 在LLM响应中未找到代码块标记 '{code_block_marker}'。将尝试传递原始响应给提取器。")
+                with open(json_log_path, "w", encoding="utf-8") as f:
+                    json.dump(serializable_logs, f, ensure_ascii=False, indent=2)
+                print(f"\n详细交互日志已保存到: {json_log_path.resolve()}")
+            except Exception as e_json:
+                print(f"保存 JSON 日志时出错: {e_json}")
                 
-                # 更新 TaskState 中的 completion，这是 scicode_solver 会用到的
-                updated_state_from_llm.output.completion = completion_for_extractor
+                
+        # ====评分部分====
+        for i, res_or_exc in enumerate(completed_task_results):
+            original_sample = samples_from_dataset[i] # 获取对应的原始样本
+            problem_id_log = original_sample.id
+
+            if isinstance(res_or_exc, Exception):
+                print(f"  处理样本 ID {problem_id_log} 时发生严重错误: {res_or_exc}")
+                import traceback
+                traceback.print_exc() 
+                results_for_json_file.append({
+                    "problem_id": problem_id_log, 
+                    "status": "ERROR_IN_PROCESSING", 
+                    "error_details": str(res_or_exc),
+                    "sub_step_interactions": []
+                })
+            elif isinstance(res_or_exc, dict):
+                print(f"  样本 ID {problem_id_log} Solver阶段处理成功。")
+                results_for_json_file.append(res_or_exc) # 添加到JSON日志列表
+                
+                # --- 调用 Scorer ---
+                final_state_for_scoring = res_or_exc.get("final_task_state_for_scorer")
+                original_sample_for_target = res_or_exc.get("original_sample_for_target")
+
+                if final_state_for_scoring and original_sample_for_target:
+                    target_for_scoring = Target(original_sample_for_target.target)
+                    print(f"    正在为样本 {problem_id_log} 调用 Scorer...")
+                    try:
+                        score_obj: Score = await actual_score_function(
+                            state=final_state_for_scoring, 
+                            target=target_for_scoring
+                        )
+                        all_scores_from_evaluator.append(score_obj)
+                        print(f"      样本 {problem_id_log} 的评分结果: {score_obj.value}")
+                    except Exception as e_score:
+                        print(f"      样本 {problem_id_log} 评分时出错: {e_score}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"    警告: 样本 {problem_id_log} 缺少用于评分的 final_task_state 或 original_sample。")
             else:
-                print(f"  [适配器] LLM 生成未产生有效的 completion 文本。")
-                if updated_state_from_llm.output: # 如果有 output 对象但 completion 为空
-                     updated_state_from_llm.output.completion = full_llm_response_text # 设为默认值
-                else: # 如果连 output 对象都没有
-                    updated_state_from_llm.output = ModelOutput(model_name=state.model, completion=full_llm_response_text, error="No output object from LLM")
+                print(f"  收到未知的任务结果 (样本 ID {problem_id_log}): {res_or_exc}")
 
 
-            # === 为了您最终的 JSON 日志记录 ===
-            # 此时，current_sub_step_prompt 是当前子问题的提示
-            # full_llm_response_text 是包含 <think> 和代码的完整原始响应
-            # 您可以在这里或 main 循环中收集这些数据。
-            # 例如，可以创建一个字典，临时存储这些值，与 problem_id 和 step_id 关联。
-            # Scicode_solver 内部循环子步骤，我们这里拿到的 state 是针对一个子步骤的。
-            # 如果要记录每个子步骤的 prompt, think, answer，这个适配器是获取它们的好地方。
-            # 但为了不让适配器太复杂，可以在 main 循环中，在 solver_callable 调用后，
-            # 检查 output_dir 中生成的 prompt 文件和 code 文件来重构。
-            # 或者，修改 solver_callable 使其返回更丰富的信息（但这会修改 inspect-ai 框架部分）。
-            # 最简单的方式是，在 ScicodePromptingAssistant 中记录 prompt 和 提取后的answer,
-            # 而 think 部分则从 full_llm_response_text 中提取（这需要在适配器或之后处理）。
-            # 此处暂时不实现复杂的日志记录，只确保评测流程。
-            # ------------------------------------
-            
-            return updated_state_from_llm
-
-        # --- 5.3 调用 Solver ---
-        print(f"  正在为样本 {problem_id} 调用 Solver...")
-        # solver_callable 是从 task_definition 获取的，它内部已经知道了 'mode' 等参数
-        final_task_state = await solver_callable(
-            state=current_task_state,
-            generate=generate_adapter_for_solver # 传递我们的适配器
-        )
-        print(f"  Solver 完成处理样本 {problem_id}。")
-
-        # --- 5.4 查看结果提示 ---
-        # SciCode 的 solver 会将 Prompts 和生成的代码保存到文件
-        model_name_on_disk = huoshan_model_id_for_inspect_ai.replace("/", "-")
-        background_subdir = 'with_background' if task_params['with_background'] else 'without_background'
         
-        prompt_path = output_dir_path / model_name_on_disk / 'prompt' / background_subdir
-        code_path = output_dir_path / model_name_on_disk / 'generated_code' / background_subdir
-        
-        print(f"  请检查以下目录中的输出文件（针对问题 {problem_id} 的各步骤）：")
-        print(f"    Prompts: {prompt_path.resolve()}")
-        print(f"    Generated Code: {code_path.resolve()}")
+        # --- 聚合和打印评分结果 ---
+        if all_scores_from_evaluator:
+            num_scored_problems = len(all_scores_from_evaluator)
             
-    if processed_samples_count == 0:
-        print("\n数据集中没有找到可处理的样本。请检查 'split' 参数和 HDF5 数据文件路径。")
+            main_problem_correct_sum = sum(s.value.get("Problem Correctness", 0) for s in all_scores_from_evaluator)
+            main_problem_resolve_rate = main_problem_correct_sum / num_scored_problems if num_scored_problems > 0 else 0.0
+            
+            total_correct_subproblems = sum(s.value.get("Total Correct", 0) for s in all_scores_from_evaluator)
+            total_subproblems_attempted = sum(s.value.get("Total Steps", 0) for s in all_scores_from_evaluator)
+            subproblem_resolve_rate = total_correct_subproblems / total_subproblems_attempted if total_subproblems_attempted > 0 else 0.0
+            
+            print("\n--- SciCode 最终评估结果 ---")
+            print(f"已处理并评分的主问题数量: {num_scored_problems}")
+            print(f"主问题解决率 (Main Problem Resolve Rate): {main_problem_resolve_rate:.4f} ({main_problem_correct_sum}/{num_scored_problems})")
+            print(f"子问题解决率 (Subproblem Resolve Rate):   {subproblem_resolve_rate:.4f} ({total_correct_subproblems}/{total_subproblems_attempted})")
+        else:
+            print("\n没有收集到评分结果，无法计算解决率。")
 
-    # --- 6. 关闭 LLM 实例（如果需要清理操作） ---
+    # --- 关闭 LLM 实例 ---
     await llm_instance.close()
     print("\n--- 自定义 SciCode 评估运行结束 ---")
 

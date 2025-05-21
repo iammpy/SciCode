@@ -134,7 +134,7 @@ def call_huoshan_sync_wrapper(messages: List[Dict[str, str]],
     # 实际应用中请删除这部分模拟代码
     
             
-    return call_huoshan(messages=messages)
+    return call_huoshan(messages=messages,model_name=model_name)
 # ==============================================================================
 
 class HuoshanLLM(ModelAPI):
@@ -142,7 +142,7 @@ class HuoshanLLM(ModelAPI):
                  model_name: str = "doubao-1.5-thinking-pro", # 这个是被记录和用于路径的模型名
                  config_path: str = "api_config.yaml",
                  temperature: float = 0.6,
-                 max_tokens: int = 4096,
+                 max_tokens: int = 16000,
                  **kwargs: Any):
         super().__init__(model_name=model_name, **kwargs) # 将规范的模型名传递给父类
         
@@ -199,7 +199,7 @@ class HuoshanLLM(ModelAPI):
                     # completion=response_content,
                     usage=None, # 如果您的函数能返回 token 使用情况，可以在这里填充 inspect_ai.model.Usage 对象
                     metadata={
-                        "completion": response_content,
+                        "raw_completion_with_think": response_content,
                         "model_name": self.actual_api_model_name,
                         "temperature": effective_temperature,
                         "max_tokens": effective_max_tokens

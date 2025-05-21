@@ -10,6 +10,7 @@ from inspect_ai.solver import solver, TaskState, Generate
 from inspect_ai.scorer import scorer, mean, metric, Metric, Score, Target
 from scicode.parse.parse import extract_function_name, get_function_from_code
 from scicode.gen.models import generate_dummy_response, extract_python_script
+import sys
 
 BACKGOUND_PROMPT_TEMPLATE = Path("./eval/data", "multistep_template.txt").read_text()
 DEFAULT_PROMPT_TEMPLATE = Path("./eval/data", "background_comment_template.txt").read_text()
@@ -199,11 +200,34 @@ class ScicodeEvaluator:
     
     def _get_background_dir(self):
         return "with_background" if self.with_background else "without_background"
-        
+    
+    def run_script(self, script_path: Path) -> tuple[int, str, str]: # 返回代码, stdout, stderr
+            print(f"DEBUG_SCI_PY: run_script() CALLED for script: {script_path}") # <--- 添加这行
+            try:
+                # 确保您在文件顶部导入了 sys
+                process_result = subprocess.run(
+                    [sys.executable, str(script_path)], # 使用 sys.executable 和确保路径是字符串
+                    check=True, capture_output=True, text=True, timeout=60
+                    # 如果需要传递 PYTHONPATH, 在这里加入 env=...
+                )
+                # print(f"  DEBUG_SCI_PY [run_script for {script_path.name}]: Subprocess STDOUT:\n{process_result.stdout}")
+                # print(f"  DEBUG_SCI_PY [run_script for {script_path.name}]: Subprocess STDERR:\n{process_result.stderr}")
+                # print(f"  DEBUG_SCI_PY [run_script for {script_path.name}]: Subprocess Returncode: {process_result.returncode}")
+
+                return 0, process_result.stdout, process_result.stderr
+            except subprocess.CalledProcessError as e:
+                # 对于 CalledProcessError，错误信息在 e.stdout 和 e.stderr
+                return 1, e.stdout, e.stderr
+            except subprocess.TimeoutExpired as e_timeout:
+                return 2, "", f"Timeout after 1800s: {e_timeout}"
+            except Exception as e_generic: # 捕获其他可能的错误
+                return 3, "", f"Unexpected error in run_script: {e_generic}"
+            
     def test_code(
         self,
         prob_data: dict,
     ):
+        # print(f"DEBUG_SCI_PY: ScicodeEvaluator.test_code() CALLED for problem_id: {prob_data.get('problem_id')}") # <--- 添加这行
         code_dir = Path(
             self.code_dir,
             "generated_code",
@@ -234,22 +258,25 @@ class ScicodeEvaluator:
 from scicode.parse.parse import process_hdf5_to_tuple
 
 """)
-                f.write(f"targets = process_hdf5_to_tuple('{step_id}', {len(test_lst)}, '{self.h5py_file}')" + '\n')
+                # f.write(f"targets = process_hdf5_to_tuple('{step_id}', {len(test_lst)}, '{self.h5py_file}')" + '\n')
+                f.write(f"targets = process_hdf5_to_tuple('{step_id}', {len(test_lst)}, {repr(str(self.h5py_file))})" + '\n')
                 for i in range(len(test_lst)):
                     f.write(f"target = targets[{i}]\n\n")
                     for line in test_lst[i].split('\n'):
                         f.write(line + '\n')
                         
-        def run_script(script_path):
-            try:
-                subprocess.run(['python', script_path], check=True, capture_output=True,
-                            text=True, timeout=1800)
-                return 0
-            except subprocess.CalledProcessError:
-                return 1
-            except subprocess.TimeoutExpired:
-                return 2
-            
+        # def run_script(script_path):
+        #     try:
+        #         subprocess.run([sys.executable, script_path], # <--- 使用 sys.executable
+        #            check=True, capture_output=True,
+        #            text=True, timeout=1800)
+        #         return 0   
+        #     except subprocess.CalledProcessError:
+        #         return 1
+        #     except subprocess.TimeoutExpired:
+        #         return 2
+        # 在 sci.py -> ScicodeEvaluator 类中
+        
         total_steps = len(sub_steps)
         total_correct = 0
         for idx in range(len(sub_steps)):
@@ -271,23 +298,51 @@ from scicode.parse.parse import process_hdf5_to_tuple
                 logs_dir,
                 f"{step_id}.log"
             )
-            if logs_file.is_file():
-                with open(logs_file, 'r') as f:
-                    content = f.read().splitlines()
-                    if content[0] == 'pass':
-                        total_correct += 1
-                continue
-            ret = run_script(script_path)
-            if ret == 0:
-                with open(logs_file, 'w') as f:
-                    f.write('pass')
-                total_correct += 1
-            elif ret == 1:
-                with open(logs_file, 'w') as f:
-                    f.write('fail')
-            else:
-                with open(logs_file, 'w') as f:
-                    f.write('time out')
+            # if logs_file.is_file():
+            #     with open(logs_file, 'r') as f:
+            #         content = f.read().splitlines()
+            #         if content[0] == 'pass':
+            #             total_correct += 1
+            #     continue
+            # ret = run_script(script_path)
+            # print(f"DEBUG_SCI_PY: Running script: {script_path}") # <--- 添加这行
+            ret_code, stdout_val, stderr_val = self.run_script(script_path) # 修改后的调用 (注意加 self)
+
+            logs_dir = Path(self.log_dir, "evaluation_logs", self._get_background_dir())
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            logs_file = logs_dir / f"{step_id}.log" # step_id 需要在循环中定义
+
+            # 打印详细信息，无论成功与否
+            print(f"    [Sub-step Test] ID: {step_id}, Script: {script_path}")
+            if stdout_val: print(f"      STDOUT:\n{stdout_val}")
+            if stderr_val: print(f"      STDERR:\n{stderr_val}") # **错误信息通常在这里**
+
+            if ret_code == 0:
+                print(f"      RESULT: PASS")
+                with open(logs_file, 'w') as f: f.write('pass')
+                total_correct += 1 # total_correct 需要在循环外初始化
+            elif ret_code == 1:
+                print(f"      RESULT: FAIL (Script Error)")
+                with open(logs_file, 'w') as f: f.write('fail')
+            elif ret_code == 2:
+                print(f"      RESULT: FAIL (Timeout)")
+                with open(logs_file, 'w') as f: f.write('time out')
+            else: # ret_code == 3 or other
+                print(f"      RESULT: FAIL (Unexpected error in run_script)")
+                with open(logs_file, 'w') as f: f.write(f'unexpected error: {stderr_val}')
+
+            # ... (后续的 problem_correct 计算和返回) ...
+            # 确保 total_correct 和 total_steps 在此方法开头正确初始化
+            # if ret == 0:
+            #     with open(logs_file, 'w') as f:
+            #         f.write('pass')
+            #     total_correct += 1
+            # elif ret == 1:
+            #     with open(logs_file, 'w') as f:
+            #         f.write('fail')
+            # else:
+            #     with open(logs_file, 'w') as f:
+            #         f.write('time out')
         
         shutil.rmtree(tmp_dir)
         problem_correct = 1 if total_correct == total_steps else 0
