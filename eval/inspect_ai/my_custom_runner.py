@@ -10,7 +10,21 @@ from typing import List, Dict, Any, Callable
 from inspect_ai.scorer import Target, Score # 导入 Score 类型
 from inspect_ai.dataset import Sample 
 # huoshan_model_id_for_inspect_ai = "deepseek-r1" 
-huoshan_model_id_for_inspect_ai = "doubao-1.5-thinking-pro" 
+# huoshan_model_id_for_inspect_ai = "DeepSeek-R1-Distill-Qwen-32B"
+
+# --- 从命令行参数获取模型名称 ---
+if len(sys.argv) > 1:
+    huoshan_model_id_for_inspect_ai = sys.argv[1]
+    print(f"从命令行参数获取模型名称: {huoshan_model_id_for_inspect_ai}")
+else:
+    # 如果没有提供命令行参数，使用默认值或提示错误
+    huoshan_model_id_for_inspect_ai = "DeepSeek-R1-Distill-Qwen-32B" # 默认值
+    print(f"警告: 未在命令行提供模型名称，将使用默认值: {huoshan_model_id_for_inspect_ai}")
+    # 或者，如果你希望强制用户提供参数，可以取消注释以下行:
+    # print("错误: 请在命令行提供模型名称作为参数。例如: python your_script_name.py YourModelName")
+    # sys.exit(1)
+# "DeepSeek-R1-Distill-Qwen-32B"
+# "DeepSeek-R1-Distill-Qwen-7B"
 # --- 路径设置 ---
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent.parent  
@@ -266,29 +280,7 @@ async def main():
         # --- 收集日志并准备评分 ---
         results_for_json_file = []
         all_scores_from_evaluator: List[Score] = []
-                # --- 保存 JSON 日志文件 ---
-        if results_for_json_file:
-            json_log_path = output_dir_path / f"{huoshan_model_id_for_inspect_ai.replace('/', '-')}_interactions_log.json"
-            try:
-                # 清理日志，确保可序列化 (TaskState 对象本身不适合直接序列化)
-                serializable_logs = []
-                for res_dict in results_for_json_file:
-                    # final_task_state_for_scorer 包含了 TaskState 对象，不能直接序列化
-                    # 我们主要关心 sub_step_interactions
-                    log_entry = {
-                        "problem_id": res_dict.get("problem_id"),
-                        "status": res_dict.get("status"),
-                        "sub_step_interactions": res_dict.get("sub_step_interactions", [])
-                    }
-                    if "error_details" in res_dict:
-                        log_entry["error_details"] = res_dict["error_details"]
-                    serializable_logs.append(log_entry)
 
-                with open(json_log_path, "w", encoding="utf-8") as f:
-                    json.dump(serializable_logs, f, ensure_ascii=False, indent=2)
-                print(f"\n详细交互日志已保存到: {json_log_path.resolve()}")
-            except Exception as e_json:
-                print(f"保存 JSON 日志时出错: {e_json}")
                 
                 
         # ====评分部分====
@@ -333,7 +325,29 @@ async def main():
             else:
                 print(f"  收到未知的任务结果 (样本 ID {problem_id_log}): {res_or_exc}")
 
+                # --- 保存 JSON 日志文件 ---
+        if results_for_json_file:
+            json_log_path = output_dir_path / f"{huoshan_model_id_for_inspect_ai.replace('/', '-')}_interactions_log.json"
+            try:
+                # 清理日志，确保可序列化 (TaskState 对象本身不适合直接序列化)
+                serializable_logs = []
+                for res_dict in results_for_json_file:
+                    # final_task_state_for_scorer 包含了 TaskState 对象，不能直接序列化
+                    # 我们主要关心 sub_step_interactions
+                    log_entry = {
+                        "problem_id": res_dict.get("problem_id"),
+                        "status": res_dict.get("status"),
+                        "sub_step_interactions": res_dict.get("sub_step_interactions", [])
+                    }
+                    if "error_details" in res_dict:
+                        log_entry["error_details"] = res_dict["error_details"]
+                    serializable_logs.append(log_entry)
 
+                with open(json_log_path, "w", encoding="utf-8") as f:
+                    json.dump(serializable_logs, f, ensure_ascii=False, indent=2)
+                print(f"\n详细交互日志已保存到: {json_log_path.resolve()}")
+            except Exception as e_json:
+                print(f"保存 JSON 日志时出错: {e_json}")
         
         # --- 聚合和打印评分结果 ---
         if all_scores_from_evaluator:
@@ -352,6 +366,19 @@ async def main():
             print(f"子问题解决率 (Subproblem Resolve Rate):   {subproblem_resolve_rate:.4f} ({total_correct_subproblems}/{total_subproblems_attempted})")
         else:
             print("\n没有收集到评分结果，无法计算解决率。")
+        
+        # --- 保存评分结果 ---
+        if all_scores_from_evaluator:
+            scores_output_path = output_dir_path / f"{huoshan_model_id_for_inspect_ai.replace('/', '-')}_scores.json"
+            try:
+                with open(scores_output_path, "w", encoding="utf-8") as f:
+                    j={}
+                    j["主问题解决率"] = main_problem_resolve_rate
+                    j["子问题解决率"] = subproblem_resolve_rate
+                    json.dump(j, f, ensure_ascii=False, indent=2)
+                print(f"评分结果已保存到: {scores_output_path.resolve()}")
+            except Exception as e_score_save:
+                print(f"保存评分结果时出错: {e_score_save}")
 
     # --- 关闭 LLM 实例 ---
     await llm_instance.close()

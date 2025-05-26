@@ -12,6 +12,8 @@ from scicode.parse.parse import extract_function_name, get_function_from_code
 from scicode.gen.models import generate_dummy_response, extract_python_script
 import sys
 
+# import os
+# os.chdir(os.path.dirname(os.path.join(__file__,"..","..")))
 BACKGOUND_PROMPT_TEMPLATE = Path("./eval/data", "multistep_template.txt").read_text()
 DEFAULT_PROMPT_TEMPLATE = Path("./eval/data", "background_comment_template.txt").read_text()
 

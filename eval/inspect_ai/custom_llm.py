@@ -10,82 +10,9 @@ import time
 import yaml
 import requests
 import traceback
+from model import call_huoshan,call_server
 
-def call_huoshan(messages, model_name="doubao-1.5-thinking-pro", config_path="./eval/inspect_ai/api_config.yaml"):
-        """
-        调用豆包模型接口，支持从配置文件中读取全部参数和带重试机制。
-        import time
-        import yaml
-        import requests
-        """
-        # 加载模型配置
-        try:
-            with open(config_path, "r", encoding="utf-8") as file:
-                api_config = yaml.safe_load(file)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Config file {config_path} not found.") from e
-        except yaml.YAMLError as e:
-            raise ValueError(f"Failed to parse YAML file: {e}") from e
-        model_cfg = api_config.get(model_name)
-        if not model_cfg:
-            raise ValueError(f"模型 '{model_name}' 的配置信息未找到。")
 
-        # 提取配置参数
-        url = model_cfg.get("base_url")
-        key = model_cfg.get("api_key")
-        model = model_cfg.get("model_name")
-        temperature = model_cfg.get("temperature", 0.2)
-        top_p = model_cfg.get("top_p", 0.95)
-        max_tokens = model_cfg.get("max_tokens", 4096)
-        max_retries = model_cfg.get("max_retries", 3)
-        retry_delay = model_cfg.get("retry_delay", 1.0)
-
-        # 重试逻辑
-        attempt = 0
-        while attempt < max_retries:
-            attempt += 1
-            try:
-                data_json = {
-                        "model": model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "top_p": top_p,
-                        "max_tokens": max_tokens
-                    }
-                response = requests.post(
-                    url=url,
-                    json=data_json,
-                    headers={
-                    "Authorization": f"Bearer {key}",
-                    "x-ark-moderation-scene": "skip-ark-moderation"
-                })
-                response.raise_for_status()  # 捕捉非 2xx 状态码
-                response_json = response.json()
-
-                choice = response_json["choices"][0]
-                finish_reason = choice["finish_reason"]
-                reasoning_content = choice["message"].get("reasoning_content", None)
-                content = choice["message"].get("content", None)
-
-                if finish_reason == "stop":
-                    if reasoning_content:
-                        formatted_content = f"<think>\n{reasoning_content.strip()}\n</think>\n\n{content.strip()}"
-                    else:
-                        formatted_content = content.strip()
-                else:
-                    formatted_content = None
-
-                return formatted_content
-
-            except Exception as e:
-                traceback.print_exc()
-                if attempt >= max_retries:
-                    print(f"[Warning] get_llm_result_r1_full failed after {max_retries} attempts: {e}")
-                    return None
-                print(f"第 {attempt} 次调用失败：{e}")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # 指数退避
-# 注意：之前讨论的 Usage 和 _prompt.Content/Role 的导入问题已通过不直接使用它们来规避
 
 # ==============================================================================
 # 用户需要实现的火山引擎 API 调用函数 (同步版本包装器)
@@ -132,9 +59,20 @@ def call_huoshan_sync_wrapper(messages: List[Dict[str, str]],
 
     # --- 为了演示，以下是模拟的响应 ---
     # 实际应用中请删除这部分模拟代码
-    
+    messages = messages[0]['content']
+   
+       
+    if model_name == "doubao-1.5-thinking-pro" or model_name == "deepseek-r1":
+        return call_huoshan([{
+        "role": "user",
+        "content": messages
+        }], model_name=model_name)
+    else:
+         return call_server(messages=messages,
+                            model_name=model_name)
+    # return call_huoshan(messages=messages,model_name=model_name)
             
-    return call_huoshan(messages=messages,model_name=model_name)
+    # return call_huoshan(messages=messages,model_name=model_name)
 # ==============================================================================
 
 class HuoshanLLM(ModelAPI):
