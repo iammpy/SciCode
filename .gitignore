@@ -16,7 +16,7 @@ logs/**
 integration/**
 test.sh
 # -------
-
+output_run_custom_scicode_final/**
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 

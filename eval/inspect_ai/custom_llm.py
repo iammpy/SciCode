@@ -21,7 +21,8 @@ def call_huoshan_sync_wrapper(messages: List[Dict[str, str]],
                               model_name: str,
                               config_path: str,
                               temperature: float,
-                              max_tokens: int) -> str:
+                              max_tokens: int,
+                              model_url:str) -> str:
     """
     这是一个同步的包装器，您需要在此处集成您实际的 call_huoshan 函数逻辑。
     它应该处理与火山引擎模型的实际通信。
@@ -42,23 +43,6 @@ def call_huoshan_sync_wrapper(messages: List[Dict[str, str]],
     print(f"    [火山调用包装器] 输入消息 (第一条): {messages[0]['content'][:100] if messages else '无消息'}")
     print(f"    [火山调用包装器] 温度: {temperature}, 最大Token数: {max_tokens}")
 
-    # **************************************************************************
-    # 在这里替换为您实际的 `call_huoshan` 函数调用逻辑
-    # 您可能需要加载 `config_path` 中的配置来初始化您的 API客户端等。
-    # 示例:
-    # client = YourHuoshanAPIClient(config_path=config_path)
-    # raw_response = client.chat(
-    #     model=model_name,
-    #     messages=messages,
-    #     temperature=temperature,
-    #     max_tokens=max_tokens
-    # )
-    # processed_text = your_processing_function(raw_response) # 从原始响应中提取文本
-    # return processed_text
-    # **************************************************************************
-
-    # --- 为了演示，以下是模拟的响应 ---
-    # 实际应用中请删除这部分模拟代码
     messages = messages[0]['content']
    
        
@@ -69,11 +53,10 @@ def call_huoshan_sync_wrapper(messages: List[Dict[str, str]],
         }], model_name=model_name)
     else:
          return call_server(messages=messages,
-                            model_name=model_name)
-    # return call_huoshan(messages=messages,model_name=model_name)
-            
-    # return call_huoshan(messages=messages,model_name=model_name)
-# ==============================================================================
+                            model_name=model_name,
+                            model_url=model_url
+                            
+                            )
 
 class HuoshanLLM(ModelAPI):
     def __init__(self,
@@ -81,6 +64,7 @@ class HuoshanLLM(ModelAPI):
                  config_path: str = "api_config.yaml",
                  temperature: float = 0.6,
                  max_tokens: int = 16000,
+                 model_url:str=None, 
                  **kwargs: Any):
         super().__init__(model_name=model_name, **kwargs) # 将规范的模型名传递给父类
         
@@ -89,6 +73,7 @@ class HuoshanLLM(ModelAPI):
         self.api_config_path = Path(config_path)
         self.api_temperature = temperature
         self.api_max_tokens = max_tokens
+        self.model_url = model_url
 
         # 如果 config_path 是相对路径，将其解析为相对于此 custom_llm.py文件的路径
         if not self.api_config_path.is_absolute():
@@ -129,7 +114,8 @@ class HuoshanLLM(ModelAPI):
                     model_name=self.actual_api_model_name,
                     config_path=str(self.api_config_path), # 确保传递字符串
                     temperature=effective_temperature,
-                    max_tokens=effective_max_tokens
+                    max_tokens=effective_max_tokens,
+                    model_url=self.model_url
                 )
                 
                 state.output = ModelOutput(

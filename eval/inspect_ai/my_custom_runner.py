@@ -15,7 +15,13 @@ from inspect_ai.dataset import Sample
 # --- 从命令行参数获取模型名称 ---
 if len(sys.argv) > 1:
     huoshan_model_id_for_inspect_ai = sys.argv[1]
-    print(f"从命令行参数获取模型名称: {huoshan_model_id_for_inspect_ai}")
+    model_url = sys.argv[2]  # 模型URL
+    # print(f"从命令行参数获取模型名称: {huoshan_model_id_for_inspect_ai}")
+    if len(sys.argv) > 3:
+        concurrency = int(sys.argv[3])  # 可选的并发数
+    else:
+        concurrency = 80  
+
 else:
     # 如果没有提供命令行参数，使用默认值或提示错误
     huoshan_model_id_for_inspect_ai = "DeepSeek-R1-Distill-Qwen-32B" # 默认值
@@ -231,12 +237,13 @@ async def main():
     llm_instance: ModelAPI = HuoshanLLM(
         model_name=huoshan_model_id_for_inspect_ai, 
         config_path=str(api_config_file),          
-        temperature=0.6                            
+        temperature=0.6,
+        model_url=model_url  # 使用命令行参数传入的模型 URL                            
     )
     print("自定义火山 LLM 初始化完成。")
 
     max_samples_to_process = 80 # 为了演示，处理少量样本 (例如2个)
-    CONCURRENCY_LIMIT = 80      # 为简化调试，先设为1，跑通后再调大 (例如3-5)
+    CONCURRENCY_LIMIT = concurrency    # 为简化调试，先设为1，跑通后再调大 (例如3-5)
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
     all_processing_tasks = []
@@ -379,6 +386,23 @@ async def main():
                 print(f"评分结果已保存到: {scores_output_path.resolve()}")
             except Exception as e_score_save:
                 print(f"保存评分结果时出错: {e_score_save}")
+        
+            model_dir=os.path.join(output_dir_path, huoshan_model_id_for_inspect_ai.replace("/", "-"))
+            if not os.path.exists(model_dir):
+                os.makedirs(model_dir)
+            data_path= os.path.join(model_dir, "scores.json")
+            try:
+                with open(data_path, "w", encoding="utf-8") as f:
+                    scores_data = {
+                        "model_name": huoshan_model_id_for_inspect_ai,
+                        "main_problem_resolve_rate": main_problem_resolve_rate,
+                        "subproblem_resolve_rate": subproblem_resolve_rate,
+                        # "scores": [score.to_dict() for score in all_scores_from_evaluator]
+                    }
+                    json.dump(scores_data, f, ensure_ascii=False, indent=2)
+                print(f"模型评分数据已保存到: {data_path}")
+            except Exception as e_score_save:
+                print(f"保存模型评分数据时出错: {e_score_save}")
 
     # --- 关闭 LLM 实例 ---
     await llm_instance.close()
