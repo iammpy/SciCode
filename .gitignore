@@ -1,5 +1,5 @@
 *.h5
-*.txt
+# *.txt
 tmp_*
 output_*
 output_run*

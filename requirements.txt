@@ -1,0 +1,5 @@
+PyYAML==6.0.2
+requests==2.32.3
+inspect-ai
+datasets==3.6.0
+inspect_ai==0.3.99
