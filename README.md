@@ -25,4 +25,4 @@ scores.json文件时最终的评测指标，pass@1的主问题通过率和子问
 
 ### 注意事项
 1、模型的调用使用固定形式，如需要修改，可修改curie/colabs/model.py 文件中的call_server函数  
-2、如果是从github上clone的，h5文件需要额外下载，需要下载[测试数据文件](https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR?usp=drive_link) ，并保存到 ./eval/data/test_data.h5
+2、如果是从github上clone的，h5文件需要额外下载，需要下载[测试数据文件](https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR?usp=drive_link) ，并保存到 ./tests/test_data.h5
